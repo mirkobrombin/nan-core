@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,18 +105,65 @@ func (e *Engine) AllEdgesFrom(from kg.NodeID) []belief.Atom {
 	return out
 }
 
+// derivedSourcePrefix marks a belief the engine wrote itself while applying a
+// rule. Everything else is a base fact a caller asserted.
+const derivedSourcePrefix = "rule:"
+
+// resolvedFalse reports whether an atom is authoritatively resolved to false.
+// Such an atom must never enter the graph, or a rule could derive from a
+// premise the store holds to be false.
+func (e *Engine) resolvedFalse(atom belief.Atom) bool {
+	r, ok := e.beliefs.Resolution(atom)
+	return ok && r.Polarity == belief.PolarityNegative
+}
+
 // Ingest adds a belief to the belief store.
-// For positive beliefs it also projects the atom into the KG as a fact.
+// For positive beliefs it also projects the atom into the KG as a fact, unless
+// the atom is authoritatively resolved false.
 func (e *Engine) ingestNoLog(b belief.Belief) (*belief.Contradiction, error) {
 	c, err := e.beliefs.Add(b)
 	if err != nil {
 		return nil, err
 	}
-	if b.Polarity == belief.PolarityPositive {
+	if b.Polarity == belief.PolarityPositive && !e.resolvedFalse(b.Atom) {
 		_ = e.graph.AddFact(b.Atom.From, b.Atom.Predicate, b.Atom.To)
 		e.semantic.Index(b.Atom)
 	}
 	return c, nil
+}
+
+// recompute rebuilds the graph and every derived fact from the base facts and
+// the resolutions the store holds. A fact resolved false is not projected, so a
+// rule cannot use it as a premise, and any earlier derivation that rested on it
+// is dropped rather than left behind. Call it whenever a resolution can flip an
+// atom the graph already carries.
+func (e *Engine) recompute() {
+	var base []belief.Belief
+	for _, atom := range e.beliefs.Atoms() {
+		for _, b := range e.beliefs.Snapshot(atom) {
+			if !strings.HasPrefix(b.Source, derivedSourcePrefix) {
+				base = append(base, b)
+			}
+		}
+	}
+	resolutions := e.beliefs.Resolutions()
+
+	e.beliefs = belief.NewStore()
+	e.graph = kg.NewMemGraph()
+	e.semantic = newSemanticIndex(vsa.DefaultDims)
+	e.derivMu.Lock()
+	e.derivations = make(map[belief.Atom][]DerivationProof)
+	e.derivMu.Unlock()
+
+	// Resolutions first, so re-ingesting a base fact respects them and a
+	// false-resolved atom is kept out of the graph.
+	for _, r := range resolutions {
+		_ = e.beliefs.SetResolution(r)
+	}
+	for _, b := range base {
+		_, _ = e.ingestNoLog(b)
+	}
+	e.ApplyRules(1000)
 }
 
 func (e *Engine) Ingest(b belief.Belief) (IngestResult, error) {
@@ -160,7 +208,9 @@ func (e *Engine) Resolve(r belief.Resolution) error {
 			return err
 		}
 	}
-	e.ApplyRules(1000)
+	// A resolution can turn an atom the graph already carries false, so the
+	// graph and every derivation are rebuilt rather than only extended.
+	e.recompute()
 	e.metrics.ResolveCount.Add(1)
 	e.metrics.Record("", "resolve", time.Since(t0), nil)
 	return nil
@@ -208,8 +258,10 @@ func (e *Engine) ReplayFromLog() error {
 	if err != nil {
 		return err
 	}
-	// Derived facts are deterministic from (facts + resolutions + rules).
-	e.ApplyRules(1000)
+	// Derived facts are deterministic from (facts + resolutions + rules). The
+	// graph is built resolution-aware here, so replaying the fact of an atom
+	// later resolved false does not leave a premise behind.
+	e.recompute()
 	return nil
 }
 
