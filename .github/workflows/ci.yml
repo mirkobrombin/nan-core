@@ -127,3 +127,52 @@ jobs:
           name: compliance-reports
           path: compliance/
           if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [test, compliance]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download compliance artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists."
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Attach compliance report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find artifacts -type f | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::no compliance artifacts to publish"
+            exit 1
+          fi
+          printf '%s\n' "${assets[@]}"
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber

@@ -2,6 +2,7 @@
   <h1>nan-core</h1>
   <p>A deterministic reasoning engine that never invents a fact.</p>
   <p>
+    <a href="https://github.com/mirkobrombin/nan-core/actions/workflows/ci.yml"><img src="https://github.com/mirkobrombin/nan-core/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go" alt="Go 1.25+">
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
   </p>
